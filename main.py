@@ -28,6 +28,9 @@
 
 import cv2
 import numpy as np
+import os
+import glob
+from PIL import Image
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 import matplotlib.gridspec as gridspec
@@ -254,9 +257,32 @@ def buat_dataset(n_per_class=35):
     return images, labels
 
 
-print("\n[CELL 4] Membuat dataset (simulasi akuisisi citra)...")
-images, labels = buat_dataset(n_per_class=35)
-print(f"  Total: {len(images)} gambar | {N_CLASSES} kelas")
+def muat_dataset_asli(folder_dataset="dataset"):
+    images_asli = []
+    labels_asli = []
+    
+    print(f"\n[CELL 4] Membaca dataset FOTO ASLI dari folder '{folder_dataset}'...")
+    for k in range(N_CLASSES):
+        folder_kelas = os.path.join(folder_dataset, str(k))
+        if not os.path.exists(folder_kelas):
+            print(f"  [!] Folder {folder_kelas} tidak ditemukan. Lewati.")
+            continue
+            
+        # Cari semua format foto jpg/jpeg/png
+        file_paths = glob.glob(os.path.join(folder_kelas, "*.[jp][pn]*")) + \
+                     glob.glob(os.path.join(folder_kelas, "*.[jJ][pP][gG]"))
+                     
+        for path in file_paths:
+            # Buka, jadikan RGB, dan resize ukuran ke 300x300 agar konsisten
+            img = np.array(Image.open(path).convert('RGB').resize((300, 300)))
+            images_asli.append(img)
+            labels_asli.append(k)
+            
+    return images_asli, labels_asli
+
+# Panggil fungsi untuk membaca foto asli
+images, labels = muat_dataset_asli("dataset")
+print(f"  Total: {len(images)} gambar asli berhasil dimuat | {N_CLASSES} kelas")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -852,17 +878,30 @@ print("═" * 65)
 scaler   = StandardScaler()
 X_scaled = scaler.fit_transform(X)
 
-X_train, X_test, y_train, y_test = train_test_split(
-    X_scaled, y, test_size=0.2, random_state=42, stratify=y
-)
+min_samples = np.min(np.bincount(y))
+if min_samples < 2:
+    print("  [!] PERINGATAN: Dataset sangat kecil (ada kelas dengan <2 foto).")
+    print("  [!] Stratifikasi dimatikan agar program tetap berjalan.")
+    X_train, X_test, y_train, y_test = train_test_split(
+        X_scaled, y, test_size=0.2 if len(y) >= 5 else 0.5, random_state=42
+    )
+else:
+    X_train, X_test, y_train, y_test = train_test_split(
+        X_scaled, y, test_size=0.2, random_state=42, stratify=y
+    )
+
+# Jika dataset terlalu kecil sampai test set kosong
+if len(X_test) == 0:
+    X_test, y_test = X_train, y_train
 print(f"\n  Data Training : {X_train.shape[0]} sampel")
 print(f"  Data Testing  : {X_test.shape[0]} sampel")
 print(f"  Jumlah Fitur  : {X_train.shape[1]} fitur")
 
 # CELL 10 — TRAINING & EVALUASI MODEL
 
+n_neighbors_safe = max(1, min(5, len(X_train)))
 models = {
-    'KNN (k=5)'        : KNeighborsClassifier(n_neighbors=5),
+    f'KNN (k={n_neighbors_safe})': KNeighborsClassifier(n_neighbors=n_neighbors_safe),
     'Decision Tree'    : DecisionTreeClassifier(max_depth=6, random_state=42),
     'Random Forest'    : RandomForestClassifier(n_estimators=150, max_depth=8,
                                                 random_state=42),
@@ -877,9 +916,15 @@ for nama, mdl in models.items():
     mdl.fit(X_train, y_train)
     y_pred   = mdl.predict(X_test)
     acc      = accuracy_score(y_test, y_pred)
-    cv_score = cross_val_score(mdl, X_scaled, y, cv=5, scoring='accuracy').mean()
+    
+    cv_splits = min(5, min_samples)
+    if cv_splits < 2:
+        cv_score = acc
+    else:
+        cv_score = cross_val_score(mdl, X_scaled, y, cv=cv_splits, scoring='accuracy').mean()
+        
     hasil_model[nama] = {'model': mdl, 'y_pred': y_pred, 'acc': acc, 'cv': cv_score}
-    print(f"  {nama:<22} → Test: {acc*100:.1f}%  |  CV-5: {cv_score*100:.1f}%")
+    print(f"  {nama:<22} → Test: {acc*100:.1f}%  |  CV: {cv_score*100:.1f}%")
 
 best_name = max(hasil_model, key=lambda k: hasil_model[k]['cv'])
 best_mdl  = hasil_model[best_name]['model']
