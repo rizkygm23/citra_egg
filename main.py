@@ -2,271 +2,207 @@ import cv2
 import numpy as np
 from PIL import Image
 import matplotlib.pyplot as plt
-import matplotlib.gridspec as gridspec
+from IPython.display import display
+import os
+
+# =============================
+# COLAB SETUP
+# =============================
+%matplotlib inline
+
+from google.colab import drive
+drive.mount('/content/drive')
+
 
 # =============================================================================
-# 1. SEGMENTASI (FINAL: EDGE BASED + SAFE FALLBACK)
+# SEGMENTASI
 # =============================================================================
 def get_egg_mask(img_rgb):
-    gray = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2GRAY)
+    hsv = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2HSV)
+    s = hsv[:,:,1]
 
-    # =========================
-    # EDGE DETECTION
-    # =========================
-    edges = cv2.Canny(gray, 30, 100)
+    _, mask = cv2.threshold(s, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
 
-    # perbesar edge
-    edges = cv2.dilate(edges, np.ones((5,5), np.uint8))
+    kernel = np.ones((9,9), np.uint8)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
 
-    cnts, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
-    # =========================
-    # FALLBACK: kalau gagal
-    # =========================
     if not cnts:
-        h, w = gray.shape
+        return mask
 
-        # pakai area tengah (AMAN, bukan ngawur)
-        mask = np.zeros_like(gray)
-        cv2.circle(mask, (w//2, h//2), min(h,w)//3, 255, -1)
-
-        cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        c = max(cnts, key=cv2.contourArea)
-        return mask, c
-
-    # ambil contour terbesar
     c = max(cnts, key=cv2.contourArea)
+    final_mask = np.zeros_like(mask)
+    cv2.drawContours(final_mask, [c], -1, 255, -1)
 
-    mask = np.zeros_like(gray)
-    cv2.drawContours(mask, [c], -1, 255, -1)
-
-    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((7,7), np.uint8))
-
-    return mask, c
+    return final_mask
 
 
 # =============================================================================
-# 2. EKSTRAKSI FITUR
+# EKSTRAKSI FITUR
 # =============================================================================
-def extract_features(img_rgb, mask, contour):
-    if contour is None:
-        return {}
-
-    features = {}
-
+def extract_features(img_rgb, mask):
     hsv = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2HSV)
     gray = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2GRAY)
 
-    # warna
-    features['S_mean'] = hsv[:,:,1][mask>0].mean()
+    S = hsv[:,:,1][mask > 0]
+    V = hsv[:,:,2][mask > 0]
 
-    # kontras
-    features['contrast'] = np.std(gray[mask>0])
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9,9))
+    blackhat = cv2.morphologyEx(gray, cv2.MORPH_BLACKHAT, kernel)
+    blackhat = cv2.bitwise_and(blackhat, blackhat, mask=mask)
 
-    # =========================
-    # DETEKSI BINTIK
-    # =========================
-    v = hsv[:,:,2]
-    s = hsv[:,:,1]
+    _, spot_mask = cv2.threshold(blackhat, 12, 255, cv2.THRESH_BINARY)
+    spot_mask = cv2.medianBlur(spot_mask, 3)
 
-    bintik_mask = (v < 140) & (s > 40) & (mask > 0)
-    bintik_mask = bintik_mask.astype(np.uint8) * 255
+    cnts, _ = cv2.findContours(spot_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
-    bintik_mask = cv2.morphologyEx(bintik_mask, cv2.MORPH_OPEN, np.ones((3,3), np.uint8))
+    spot_area = 0
+    valid = []
 
-    cnts, _ = cv2.findContours(bintik_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    for c in cnts:
+        area = cv2.contourArea(c)
+        if 10 < area < 500:
+            valid.append(c)
+            spot_area += area
 
-    spots = [c for c in cnts if 20 < cv2.contourArea(c) < 500]
-    features['bintik_count'] = len(spots)
+    egg_area = np.sum(mask > 0)
 
-    # tekstur
-    lap = cv2.Laplacian(gray, cv2.CV_64F)
-    features['roughness'] = np.var(lap[mask>0]) / 100.0
-
-    return features
-
-
-# =============================================================================
-# 3. CLASSIFICATION (FINAL FIXED)
-# =============================================================================
-def classify(features):
-    if not features:
-        return "Tidak Terdeteksi", {}
-
-    S = features['S_mean']
-    contrast = features['contrast']
-    spots = features['bintik_count']
-    rough = features['roughness']
-
-    # CACINGAN
-    if spots > 5:
-        return "Cacingan", features
-
-    # TUA (FIX)
-    if rough > 0.8 and contrast < 50:
-        return "Tua", features
-
-    # KALSIUM
-    if S < 90 and contrast < 40:
-        return "Kalsium", features
-
-    # STRES
-    if S < 110:
-        return "Stres", features
-
-    return "Sehat", features
+    return {
+        "S_mean": float(np.mean(S)),
+        "V_mean": float(np.mean(V)),
+        "spot_area_ratio": spot_area / (egg_area + 1e-6),
+        "bintik_count": len(valid),
+        "avg_spot_size": spot_area / (len(valid)+1e-6)
+    }, spot_mask
 
 
 # =============================================================================
-# 4. VISUALISASI
+# CLASSIFICATION + EXPLANATION
+# =============================================================================
+def classify(f):
+    S, V = f['S_mean'], f['V_mean']
+    ratio, count = f['spot_area_ratio'], f['bintik_count']
+
+    if S < 120 and V > 150:
+        return "Stres", "Warna pucat (S rendah)"
+
+    if ratio > 0.02:
+        return "Cacingan", "Area bintik besar"
+
+    if count >= 6 and ratio > 0.005:
+        return "Cacingan", "Bintik banyak"
+
+    if count >= 8:
+        return "Cacingan", "Bintik sangat banyak"
+
+    return "Sehat", "Warna normal & bintik sedikit"
+
+
+# =============================================================================
+# VISUAL INFORMATIVE
 # =============================================================================
 def process_image(path):
     img = np.array(Image.open(path).convert('RGB').resize((300,300)))
 
-    mask, contour = get_egg_mask(img)
-    feats = extract_features(img, mask, contour)
-    diagnosis, _ = classify(feats)
+    mask = get_egg_mask(img)
+    f, spot_mask = extract_features(img, mask)
+    pred, reason = classify(f)
 
     hsv = cv2.cvtColor(img, cv2.COLOR_RGB2HSV)
-    gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
 
-    s = hsv[:,:,1]
-    v = hsv[:,:,2]
+    fig = plt.figure(figsize=(14,6))
 
-    # =========================
-    # BINTIK VISUAL
-    # =========================
-    bintik_mask = ((v < 140) & (s > 40) & (mask > 0)).astype(np.uint8) * 255
+    # BARIS 1
+    plt.subplot(2,4,1); plt.imshow(img); plt.title("Original"); plt.axis('off')
+    plt.subplot(2,4,2); plt.imshow(mask, cmap='gray'); plt.title("Mask"); plt.axis('off')
+    plt.subplot(2,4,3); plt.imshow(hsv[:,:,1], cmap='YlOrBr'); plt.title(f"S={f['S_mean']:.1f}"); plt.axis('off')
+    plt.subplot(2,4,4); plt.imshow(spot_mask, cmap='hot'); plt.title(f"Count={f['bintik_count']}"); plt.axis('off')
 
-    # =========================
-    # EDGE
-    # =========================
-    edges = cv2.Canny(gray, 30, 100)
+    # BARIS 2 (TEXT)
+    plt.subplot(2,1,2)
+    plt.axis('off')
 
-    # =========================
-    # TEKSTUR (LAPLACIAN)
-    # =========================
-    lap = cv2.Laplacian(gray, cv2.CV_64F)
-    lap_vis = cv2.convertScaleAbs(lap)
+    plt.text(0,0.9,
+             f"HASIL ANALISIS\n"
+             f"----------------------\n"
+             f"Diagnosis : {pred}\n"
+             f"Alasan    : {reason}\n\n"
+             f"S (warna) : {f['S_mean']:.1f}\n"
+             f"Count     : {f['bintik_count']}\n"
+             f"Ratio     : {f['spot_area_ratio']:.4f}",
+             fontsize=12)
 
-    # =========================
-    # PLOT
-    # =========================
-    fig = plt.figure(figsize=(18,10))
-    gs = gridspec.GridSpec(2,4)
+    display(fig)
+    plt.close()
 
-    ax1 = plt.subplot(gs[0,0])
-    ax1.imshow(img)
-    ax1.set_title("Original")
-    ax1.axis('off')
+    return pred
 
-    ax2 = plt.subplot(gs[0,1])
-    ax2.imshow(mask, cmap='gray')
-    ax2.set_title("Mask")
-    ax2.axis('off')
-
-    ax3 = plt.subplot(gs[0,2])
-    ax3.imshow(s, cmap='YlOrBr')
-    ax3.set_title(f"Saturation\nMean: {feats.get('S_mean',0):.1f}")
-    ax3.axis('off')
-
-    ax4 = plt.subplot(gs[0,3])
-    ax4.imshow(v, cmap='gray')
-    ax4.set_title("Brightness (V)")
-    ax4.axis('off')
-
-    ax5 = plt.subplot(gs[1,0])
-    ax5.imshow(bintik_mask, cmap='hot')
-    ax5.set_title(f"Bintik\nCount: {feats.get('bintik_count',0)}")
-    ax5.axis('off')
-
-    ax6 = plt.subplot(gs[1,1])
-    ax6.imshow(edges, cmap='gray')
-    ax6.set_title("Edge Detection")
-    ax6.axis('off')
-
-    ax7 = plt.subplot(gs[1,2])
-    ax7.imshow(lap_vis, cmap='inferno')
-    ax7.set_title(f"Texture (Roughness)\n{feats.get('roughness',0):.2f}")
-    ax7.axis('off')
-
-    ax8 = plt.subplot(gs[1,3])
-    ax8.axis('off')
-
-    text = f"""
-DIAGNOSIS: {diagnosis}
-
-FEATURES:
-S_mean     : {feats.get('S_mean',0):.1f}
-Contrast   : {feats.get('contrast',0):.1f}
-Spots      : {feats.get('bintik_count',0)}
-Roughness  : {feats.get('roughness',0):.2f}
-"""
-
-    ax8.text(0.05,0.9,text,fontsize=12,va='top',
-             bbox=dict(boxstyle='round', facecolor='#e8f6f3'))
-
-    plt.tight_layout()
-    return fig
 
 # =============================================================================
-# 5. AUTO TESTING
+# TESTING (ANTI ERROR)
 # =============================================================================
-def run_evaluation():
-    print("\n" + "="*60)
-    print("EVALUASI DATASET")
-    print("="*60)
-
-    test_files = {
-        "sehat.png": "Sehat",
-        "kalsium.png": "Kalsium",
-        "cacingan.png": "Cacingan",
-        "stres.png": "Stres",
-        "tua.png": "Tua"
+def run_testing(base_path):
+    # 🔥 mapping folder → label model
+    folder_map = {
+        "Sehat": "Sehat",
+        "Setres": "Stres",   # 🔥 FIX TYPO
+        "Cacingan": "Cacingan"
     }
 
+    total = 0
     correct = 0
-    results = []
 
-    for file, label in test_files.items():
-        try:
-            img = np.array(Image.open(file).convert('RGB').resize((300,300)))
+    print("\nTESTING")
+    print("Base path:", base_path)
 
-            mask, contour = get_egg_mask(img)
-            feats = extract_features(img, mask, contour)
-            pred, _ = classify(feats)
+    if not os.path.exists(base_path):
+        print("❌ BASE PATH SALAH!")
+        return
 
-            ok = (pred == label)
-            if ok:
+    for folder_name, true_label in folder_map.items():
+        folder = os.path.join(base_path, folder_name)
+
+        if not os.path.exists(folder):
+            print(f"❌ Folder tidak ada: {folder}")
+            continue
+
+        for file in os.listdir(folder):
+            path = os.path.join(folder, file)
+
+            if not os.path.isfile(path):
+                continue
+
+            img = np.array(Image.open(path).convert('RGB').resize((300,300)))
+            mask = get_egg_mask(img)
+            f, _ = extract_features(img, mask)
+            pred, _ = classify(f)
+
+            total += 1
+
+            # 🔥 COMPARISON YANG BENAR
+            if pred.strip().lower() == true_label.strip().lower():
                 correct += 1
 
-            results.append((file, label, pred, ok))
+            print(f"{file} | GT:{true_label} | Pred:{pred}")
 
-        except:
-            results.append((file, label, "ERROR", False))
-
-    print("\nHASIL:")
-    print("-"*60)
-
-    for r in results:
-        print(f"{r[0]:15} | GT:{r[1]:10} | Pred:{r[2]:10} | {'✓' if r[3] else '✗'}")
-
-    total = len(test_files)
-    print("-"*60)
-    print(f"AKURASI: {correct}/{total} = {(correct/total)*100:.2f}%")
-
-    print("="*60)
-
+    if total == 0:
+        print("\n❌ Tidak ada data ditemukan!")
+    else:
+        print(f"\nAccuracy: {correct}/{total} = {(correct/total)*100:.2f}%")
 
 # =============================================================================
 # MAIN
 # =============================================================================
+base_path = "/content/drive/MyDrive/Citra_egg"  # 🔥 FIX PATH
+
 if __name__ == "__main__":
-    run_evaluation()
+    run_testing(base_path)
 
     from google.colab import files
     uploaded = files.upload()
 
     for f in uploaded.keys():
-        fig = process_image(f)
-        plt.show()
+        print("\n===== VISUAL ANALISIS =====")
+        process_image(f)
