@@ -112,28 +112,67 @@ def process_image(path):
 
     hsv = cv2.cvtColor(img, cv2.COLOR_RGB2HSV)
 
-    fig = plt.figure(figsize=(14,6))
+    fig = plt.figure(figsize=(16,7))
 
-    # BARIS 1
-    plt.subplot(2,4,1); plt.imshow(img); plt.title("Original"); plt.axis('off')
-    plt.subplot(2,4,2); plt.imshow(mask, cmap='gray'); plt.title("Mask"); plt.axis('off')
-    plt.subplot(2,4,3); plt.imshow(hsv[:,:,1], cmap='YlOrBr'); plt.title(f"S={f['S_mean']:.1f}"); plt.axis('off')
-    plt.subplot(2,4,4); plt.imshow(spot_mask, cmap='hot'); plt.title(f"Count={f['bintik_count']}"); plt.axis('off')
+    # =========================
+    # BARIS 1 (IMAGE + METODE)
+    # =========================
 
-    # BARIS 2 (TEXT)
+    plt.subplot(2,4,1)
+    plt.imshow(img)
+    plt.title("Original Image\n(Input)")
+    plt.axis('off')
+
+    plt.subplot(2,4,2)
+    plt.imshow(mask, cmap='gray')
+    plt.title("Segmentation\n(Otsu + Morphology)")
+    plt.axis('off')
+
+    plt.subplot(2,4,3)
+    plt.imshow(hsv[:,:,1], cmap='YlOrBr')
+    plt.title("Color Feature (S)\nHSV - Saturation")
+    plt.axis('off')
+
+    plt.subplot(2,4,4)
+    plt.imshow(spot_mask, cmap='hot')
+    plt.title("Spot Detection\nBlackhat + Threshold")
+    plt.axis('off')
+
+    # =========================
+    # BARIS 2 (ANALISIS TEXT)
+    # =========================
+
     plt.subplot(2,1,2)
     plt.axis('off')
 
-    plt.text(0,0.9,
-             f"HASIL ANALISIS\n"
-             f"----------------------\n"
-             f"Diagnosis : {pred}\n"
-             f"Alasan    : {reason}\n\n"
-             f"S (warna) : {f['S_mean']:.1f}\n"
-             f"Count     : {f['bintik_count']}\n"
-             f"Ratio     : {f['spot_area_ratio']:.4f}",
-             fontsize=12)
+    plt.text(0,0.95,
+             f"HASIL ANALISIS SISTEM\n"
+             f"=====================================\n\n"
 
+             f"1. WARNA TELUR (HSV - Saturation)\n"
+             f"   Nilai S      : {f['S_mean']:.1f}\n"
+             f"   Interpretasi : {'Pucat' if f['S_mean'] < 120 else 'Normal'}\n\n"
+
+             f"2. DETEKSI BINTIK (Morphology Blackhat)\n"
+             f"   Jumlah Bintik : {f['bintik_count']}\n"
+             f"   Rata-rata     : {f['avg_spot_size']:.1f}\n\n"
+
+             f"3. LUAS BINTIK\n"
+             f"   Ratio Area : {f['spot_area_ratio']:.4f}\n\n"
+
+             f"4. KEPUTUSAN SISTEM\n"
+             f"   Diagnosis : {pred}\n"
+             f"   Alasan    : {reason}\n\n"
+
+             f"-------------------------------------\n"
+             f"Metode yang digunakan:\n"
+             f"- Segmentasi: Otsu Thresholding + Morphology\n"
+             f"- Warna: HSV Color Space (S channel)\n"
+             f"- Bintik: Blackhat Morphology + Contour Detection\n"
+             f"- Klasifikasi: Rule-Based Decision",
+             fontsize=11)
+
+    plt.tight_layout()
     display(fig)
     plt.close()
 
