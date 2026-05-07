@@ -69,25 +69,13 @@ def extract_features(img_rgb, mask):
 
     egg_area = np.sum(mask > 0)
 
-    # --- METODE KERIPUT (CANNY EDGE DETECTION) ---
-    # Erode mask sedikit agar tidak mendeteksi pinggiran telur sebagai edge
-    erode_kernel = np.ones((15,15), np.uint8)
-    eroded_mask = cv2.erode(mask, erode_kernel, iterations=1)
-    
-    blurred = cv2.GaussianBlur(gray, (5, 5), 0)
-    edges = cv2.Canny(blurred, 40, 120)
-    edges = cv2.bitwise_and(edges, edges, mask=eroded_mask)
-    
-    edge_density = np.sum(edges > 0) / (np.sum(eroded_mask > 0) + 1e-6)
-
     return {
         "S_mean": float(np.mean(S)),
         "V_mean": float(np.mean(V)),
         "spot_area_ratio": spot_area / (egg_area + 1e-6),
         "bintik_count": len(valid),
-        "avg_spot_size": spot_area / (len(valid)+1e-6),
-        "edge_density": float(edge_density)
-    }, spot_mask, edges
+        "avg_spot_size": spot_area / (len(valid)+1e-6)
+    }, spot_mask
 
 
 # =============================================================================
@@ -96,10 +84,6 @@ def extract_features(img_rgb, mask):
 def classify(f):
     S, V = f['S_mean'], f['V_mean']
     ratio, count = f['spot_area_ratio'], f['bintik_count']
-    edge_density = f.get('edge_density', 0.0)
-
-    if edge_density > 0.03:
-        return "Tua", "Permukaan keriput (Edge density tinggi)"
 
     if S < 120 and V > 150:
         return "Stres", "Warna pucat (S rendah)"
@@ -113,92 +97,45 @@ def classify(f):
     if count >= 8:
         return "Cacingan", "Bintik sangat banyak"
 
-    return "Sehat", "Warna normal, permukaan halus, & bintik sedikit"
-
-
-# =============================================================================
-# SIMPAN OUTPUT METODE
-# =============================================================================
-def save_output_images(pred, filename, img, mask, hsv_s, spot_mask, edges, fig=None, index=None):
-    base_output = "/content/drive/MyDrive/Citra_egg/output"
-    class_dir = os.path.join(base_output, pred)
-    
-    _, ext = os.path.splitext(filename)
-    if not ext:
-        ext = '.jpg'
-        
-    # Gunakan penamaan gambar1, gambar2, dst.
-    name = f"gambar{index}" if index is not None else "gambar_upload"
-        
-    methods = {
-        "1_Original": cv2.cvtColor(img, cv2.COLOR_RGB2BGR),
-        "2_Segmentation": mask,
-        "3_Color_HSV": hsv_s,
-        "4_Spot_Blackhat": spot_mask,
-        "5_Texture_Canny": edges
-    }
-    
-    for method_name, save_img in methods.items():
-        method_dir = os.path.join(class_dir, method_name)
-        os.makedirs(method_dir, exist_ok=True)
-        
-        # Format: namaAsli_prediksi_metode.ext
-        metode_bersih = method_name.split("_", 1)[1]
-        new_filename = f"{name}_{pred}_{metode_bersih}{ext}"
-        
-        cv2.imwrite(os.path.join(method_dir, new_filename), save_img)
-        
-    if fig is not None:
-        fig_dir = os.path.join(class_dir, "6_Visual_Analysis")
-        os.makedirs(fig_dir, exist_ok=True)
-        new_fig_name = f"{name}_{pred}_VisualAnalysis.png"
-        fig.savefig(os.path.join(fig_dir, new_fig_name))
+    return "Sehat", "Warna normal & bintik sedikit"
 
 
 # =============================================================================
 # VISUAL INFORMATIVE
 # =============================================================================
-def process_image(path, filename=None, index=None):
-    if filename is None:
-        filename = os.path.basename(path)
-
+def process_image(path):
     img = np.array(Image.open(path).convert('RGB').resize((300,300)))
 
     mask = get_egg_mask(img)
-    f, spot_mask, edges = extract_features(img, mask)
+    f, spot_mask = extract_features(img, mask)
     pred, reason = classify(f)
 
     hsv = cv2.cvtColor(img, cv2.COLOR_RGB2HSV)
 
-    fig = plt.figure(figsize=(20, 8))
+    fig = plt.figure(figsize=(16,7))
 
     # =========================
     # BARIS 1 (IMAGE + METODE)
     # =========================
 
-    plt.subplot(2,5,1)
+    plt.subplot(2,4,1)
     plt.imshow(img)
     plt.title("Original Image\n(Input)")
     plt.axis('off')
 
-    plt.subplot(2,5,2)
+    plt.subplot(2,4,2)
     plt.imshow(mask, cmap='gray')
     plt.title("Segmentation\n(Otsu + Morphology)")
     plt.axis('off')
 
-    plt.subplot(2,5,3)
+    plt.subplot(2,4,3)
     plt.imshow(hsv[:,:,1], cmap='YlOrBr')
     plt.title("Color Feature (S)\nHSV - Saturation")
     plt.axis('off')
 
-    plt.subplot(2,5,4)
+    plt.subplot(2,4,4)
     plt.imshow(spot_mask, cmap='hot')
     plt.title("Spot Detection\nBlackhat + Threshold")
-    plt.axis('off')
-
-    plt.subplot(2,5,5)
-    plt.imshow(edges, cmap='gray')
-    plt.title("Texture/Wrinkles\nCanny Edge")
     plt.axis('off')
 
     # =========================
@@ -218,11 +155,10 @@ def process_image(path, filename=None, index=None):
 
              f"2. DETEKSI BINTIK (Morphology Blackhat)\n"
              f"   Jumlah Bintik : {f['bintik_count']}\n"
-             f"   Rata-rata     : {f['avg_spot_size']:.1f}\n"
-             f"   Ratio Area    : {f['spot_area_ratio']:.4f}\n\n"
-             
-             f"3. DETEKSI KERIPUT (Canny Edge)\n"
-             f"   Edge Density  : {f['edge_density']:.4f}\n\n"
+             f"   Rata-rata     : {f['avg_spot_size']:.1f}\n\n"
+
+             f"3. LUAS BINTIK\n"
+             f"   Ratio Area : {f['spot_area_ratio']:.4f}\n\n"
 
              f"4. KEPUTUSAN SISTEM\n"
              f"   Diagnosis : {pred}\n"
@@ -233,15 +169,10 @@ def process_image(path, filename=None, index=None):
              f"- Segmentasi: Otsu Thresholding + Morphology\n"
              f"- Warna: HSV Color Space (S channel)\n"
              f"- Bintik: Blackhat Morphology + Contour Detection\n"
-             f"- Keriput: Canny Edge Detection\n"
              f"- Klasifikasi: Rule-Based Decision",
              fontsize=11)
 
     plt.tight_layout()
-    
-    # Panggil fungsi simpan
-    save_output_images(pred, filename, img, mask, hsv[:,:,1], spot_mask, edges, fig, index=index)
-    
     display(fig)
     plt.close()
 
@@ -256,8 +187,7 @@ def run_testing(base_path):
     folder_map = {
         "Sehat": "Sehat",
         "Setres": "Stres",   # 🔥 FIX TYPO
-        "Cacingan": "Cacingan",
-        "Tua": "Tua"
+        "Cacingan": "Cacingan"
     }
 
     total = 0
@@ -285,14 +215,10 @@ def run_testing(base_path):
 
             img = np.array(Image.open(path).convert('RGB').resize((300,300)))
             mask = get_egg_mask(img)
-            f, spot_mask, edges = extract_features(img, mask)
+            f, _ = extract_features(img, mask)
             pred, _ = classify(f)
 
             total += 1
-
-            # 🔥 SIMPAN KE FOLDER OUTPUT
-            hsv = cv2.cvtColor(img, cv2.COLOR_RGB2HSV)
-            save_output_images(pred, file, img, mask, hsv[:,:,1], spot_mask, edges, index=total)
 
             # 🔥 COMPARISON YANG BENAR
             if pred.strip().lower() == true_label.strip().lower():
@@ -316,6 +242,6 @@ if __name__ == "__main__":
     from google.colab import files
     uploaded = files.upload()
 
-    for idx, f in enumerate(uploaded.keys(), 1):
+    for f in uploaded.keys():
         print("\n===== VISUAL ANALISIS =====")
-        process_image(f, filename=f, index=idx)
+        process_image(f)
